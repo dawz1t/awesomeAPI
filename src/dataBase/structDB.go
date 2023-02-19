@@ -8,7 +8,13 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 )
+
+type itemsByProvider struct {
+	ProviderName string
+	Items        []Item
+}
 
 type Item struct {
 	Id                 uint32
@@ -29,6 +35,11 @@ type Item struct {
 	QTYlots            string
 }
 
+type filter struct {
+	Id   int
+	Name string
+}
+
 func GetItems(c *gin.Context) {
 
 	db, err := sql.Open("odbc", "DSN=storage")
@@ -44,11 +55,104 @@ func GetItems(c *gin.Context) {
 	if err != nil {
 		start = 0
 	}
-	_, items := SelectRows(db, start, step)
+	_, items := SelectRows(db, start, step, getFilters(c))
+
+	fmt.Println(getFilters(c))
 
 	defer db.Close()
 
 	c.IndentedJSON(http.StatusOK, items)
+}
+
+func GetItemsByProviders(c *gin.Context) {
+
+	db, err := sql.Open("odbc", "DSN=storage")
+	if err != nil {
+		fmt.Println("Error in connect DB")
+		log.Fatal(err)
+	}
+	step, err := strconv.Atoi(c.DefaultQuery("step", "100"))
+	if err != nil {
+		step = 100
+	}
+	start, _ := strconv.Atoi(c.DefaultQuery("start", "0"))
+	if err != nil {
+		start = 0
+	}
+	filters := getFilterTable(db, "vendors")
+	var resultItems []itemsByProvider
+	var resultItem itemsByProvider
+
+	for _, val := range filters {
+		fmt.Println(val.Id)
+		_, items := SelectRows(db, start, step, getFiltersByVendor(c, val.Id))
+		resultItem.ProviderName = val.Name
+		resultItem.Items = items
+		resultItems = append(resultItems, resultItem)
+	}
+
+	defer db.Close()
+
+	c.IndentedJSON(http.StatusOK, resultItems)
+}
+
+func getFilterTable(db *sql.DB, tableName string) []filter {
+	var filterTable []filter
+	var filterEx filter
+	var err error
+	var query string
+
+	query = "SELECT * from " + tableName
+
+	rows, err := db.Query(query)
+	if err != nil {
+		log.Fatal(err)
+	}
+	//var byteValue []byte
+	if tableName == "vendors" {
+		var storageType string
+		for rows.Next() {
+			if err := rows.Scan(&filterEx.Id, &filterEx.Name, &storageType); err != nil {
+				log.Fatal(err)
+			}
+
+			err = decodeFilter(&filterEx)
+			filterTable = append(filterTable, filterEx)
+
+		}
+	}
+
+	defer rows.Close()
+	return filterTable
+
+}
+
+func getFilters(c *gin.Context) map[string]string {
+	//var filters map[string]string
+	filters := make(map[string]string)
+
+	filters["products.name"] = c.Query("productName")
+	filters["brands.id"] = c.Query("brandId")
+	filters["productGroups.id"] = c.Query("productGroupId")
+	filters["parentProductGroups.id"] = c.Query("parentProductGroupId")
+	filters["storages.id"] = c.Query("storageId")
+	filters["vendors.id"] = c.Query("vendorId")
+
+	return filters
+}
+
+func getFiltersByVendor(c *gin.Context, providerId int) map[string]string {
+	//var filters map[string]string
+	filters := make(map[string]string)
+
+	filters["products.name"] = c.Query("productName")
+	filters["brands.id"] = c.Query("brandId")
+	filters["productGroups.id"] = c.Query("productGroupId")
+	filters["parentProductGroups.id"] = c.Query("parentProductGroupId")
+	filters["storages.id"] = c.Query("storageId")
+	filters["vendors.id"] = strconv.Itoa(providerId)
+
+	return filters
 }
 
 func GetItemCount(c *gin.Context) {
@@ -59,20 +163,40 @@ func GetItemCount(c *gin.Context) {
 		log.Fatal(err)
 	}
 
-	count, err := selectCountAll(db, "items")
+	count, err := selectItemsCount(db, getFilters(c))
 	defer db.Close()
 
 	c.IndentedJSON(http.StatusOK, count)
 
 }
 
-func selectCountAll(db *sql.DB, tableName string) (int, error) {
+func selectItemsCount(db *sql.DB, filters map[string]string) (int, error) {
 
 	var err error
 	var count int
 	var rows *sql.Rows
 
-	query := "select count(*) from " + tableName
+	query := "select count(*) from items " +
+		"INNER JOIN brands ON(items.id_brand=brands.id) " +
+		"INNER JOIN products ON(items.id_product=products.id) " +
+		"INNER JOIN productGroups ON(items.id_productGroup=productGroups.id) " +
+		"INNER JOIN parentProductGroups ON(items.id_parentProductGroup=parentProductGroups.id) " +
+		"INNER JOIN storages ON(items.id_storage=storages.id) " +
+		"INNER JOIN vendors ON(storages.id_vendor=vendors.id) " +
+		"WHERE items.id = items.id "
+
+	for idx, val := range filters {
+		if idx == "products.name" && val != "" {
+			names := strings.Split(val, " ")
+			for _, v := range names {
+				query = query + " AND " + idx + " LIKE " + "'%" + v + "%' "
+			}
+
+		} else if val != "" {
+			query = query + " AND " + idx + " IN(" + val + ") "
+		}
+	}
+
 	rows, err = db.Query(query)
 
 	if err != nil {
@@ -89,7 +213,7 @@ func selectCountAll(db *sql.DB, tableName string) (int, error) {
 	return count, err
 }
 
-func SelectRows(db *sql.DB, start int, step int) (error, []Item) {
+func SelectRows(db *sql.DB, start int, step int, filters map[string]string) (error, []Item) {
 	var err error
 	var query string
 	var items []Item
@@ -103,8 +227,21 @@ func SelectRows(db *sql.DB, start int, step int) (error, []Item) {
 		"INNER JOIN parentProductGroups ON(items.id_parentProductGroup=parentProductGroups.id) " +
 		"INNER JOIN storages ON(items.id_storage=storages.id) " +
 		"INNER JOIN vendors ON(storages.id_vendor=vendors.id) " +
-		"ORDER BY items.id " +
-		"OFFSET " + strconv.Itoa(start) + " ROWS FETCH NEXT " + strconv.Itoa(step) + " ROWS ONLY"
+		"WHERE items.id = items.id "
+
+	for idx, val := range filters {
+		if idx == "products.name" && val != "" {
+			names := strings.Split(val, " ")
+			for _, v := range names {
+				query = query + " AND " + idx + " LIKE " + "'%" + v + "%' "
+			}
+
+		} else if val != "" {
+			query = query + " AND " + idx + " IN(" + val + ") "
+
+		}
+	}
+	query = query + "ORDER BY items.retailPrice OFFSET " + strconv.Itoa(start) + " ROWS FETCH NEXT " + strconv.Itoa(step) + " ROWS ONLY"
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -134,6 +271,14 @@ func decodeItem(item *Item) error {
 	item.ParentProductGroup, _ = Decode(item.ParentProductGroup)
 	item.Storage, _ = Decode(item.Storage)
 	item.Vendor, _ = Decode(item.Vendor)
+
+	return err
+}
+
+func decodeFilter(item *filter) error {
+	var err error
+
+	item.Name, _ = Decode(item.Name)
 
 	return err
 }

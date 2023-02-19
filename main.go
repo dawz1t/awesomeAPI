@@ -11,6 +11,7 @@ func main() {
 	router := gin.Default()
 	router.GET("/getItems", data.GetItems)
 	router.GET("/getItemsCount", data.GetItemCount)
+	router.GET("/getItemsByProvider", data.GetItemsByProviders)
 
 	router.Run("localhost:8080")
 
